@@ -1,0 +1,13 @@
+# ignore .csv files
+*.csv
+# ignore .cpg, .dbf, .prj, .shp, .shx files
+*.cpg
+*.dbf
+*.prj
+*.shp
+*.shx
+# ignore .hdf and .tif files
+*.hdf
+*.tif
+# ignore folder /data
+data/
