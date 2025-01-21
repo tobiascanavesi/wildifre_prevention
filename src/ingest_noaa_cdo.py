@@ -8,9 +8,13 @@ CDO_TOKEN = "FBYGDxCnrDBxxUXdXqAbPRFUYqMBWzqK"
 # NOAA CDO specifics
 CDO_URL = "https://www.ncdc.noaa.gov/cdo-web/api/v2/data"
 DATASET_ID = "GHCND"  # daily data
+# We need to think you to integrate each station's data with the fire data, in the sense that each station will show different 
+# information and that could help us to have a better prediction of the fire risk.
+# To see the station : https://www.ncdc.noaa.gov/cdo-web/datasets/GHCND/stations/GHCND:USW00023234/detail
+# Los angeles station is GHCND:USW00093134
 STATION_ID = "GHCND:USW00023234"  # Example: SFO Airport
-START_DATE = "2019-01-01"
-END_DATE = "2019-12-31"
+START_DATE = "2015-01-01"
+END_DATE = "2015-12-31"
 
 # Local directories (relative to the script)
 BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))

@@ -11,3 +11,7 @@
 *.tif
 # ignore folder /data
 data/
+# exclude train_model.py
+train_model.py
+# exlude data_exploration.ipynb
+data_exploration.ipynb

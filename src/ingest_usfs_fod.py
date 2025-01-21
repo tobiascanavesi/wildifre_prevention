@@ -1,5 +1,3 @@
-# src/ingest_usfs_fod.py
-
 import os
 import pandas as pd
 from datetime import datetime

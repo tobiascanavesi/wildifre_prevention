@@ -1,68 +1,212 @@
-import os
+# src/model_training.py
+
 import pandas as pd
-import lightgbm as lgb
+import geopandas as gpd
+from shapely.geometry import Polygon
+from sklearn.preprocessing import StandardScaler
+from sklearn.cluster import KMeans
+from sklearn.metrics import silhouette_score
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import roc_auc_score, classification_report
+import lightgbm as lgb
+from imblearn.over_sampling import SMOTE
+import joblib
+import warnings
 
-PROCESSED_DIR = os.path.join("..", "data", "processed")
-MODELS_DIR = os.path.join("..", "models")
+warnings.filterwarnings("ignore")
 
-def load_local_data():
-    # For simplicity, just load the most recent processed file
-    # Or load multiple CSV files and concatenate
-    files = sorted([f for f in os.listdir(PROCESSED_DIR) if f.endswith(".csv")])
-    if not files:
-        raise ValueError("No processed data found! Run ingest_data.py first.")
+# Load data
+def load_data(csv_path):
+    df = pd.read_csv(csv_path, parse_dates=['date'])
+    return df
+
+def load_grid(shapefile_path):
+    grid_gdf = gpd.read_file(shapefile_path)
+    return grid_gdf
+
+def load_grid_centroids(grid_gdf):
+    centroids_projected = grid_gdf.geometry.centroid
+    gdf_centroids = gpd.GeoDataFrame(
+        grid_gdf[['cell_id']].copy(),
+        geometry=centroids_projected,
+        crs=grid_gdf.crs
+    )
+    gdf_centroids = gdf_centroids.to_crs(epsg=4326)
+    gdf_centroids['centroid_lon'] = gdf_centroids.geometry.x
+    gdf_centroids['centroid_lat'] = gdf_centroids.geometry.y
+    return gdf_centroids[['cell_id', 'centroid_lon', 'centroid_lat']]
+
+# Feature Engineering
+def feature_engineering(df):
+    # Time-based features
+    df['day_of_year'] = df['date'].dt.dayofyear
+    df['day_of_month'] = df['date'].dt.day
+    df['month'] = df['date'].dt.month_name()
+    df['day_of_week'] = df['date'].dt.day_name()
     
-    latest_file = os.path.join(PROCESSED_DIR, files[-1])
-    df = pd.read_csv(latest_file)
+    def get_season(month):
+        if month in ['December', 'January', 'February']:
+            return 'Winter'
+        elif month in ['March', 'April', 'May']:
+            return 'Spring'
+        elif month in ['June', 'July', 'August']:
+            return 'Summer'
+        else:
+            return 'Fall'
     
-    # Example: We'll pretend we have a 'fire_occurred' column for supervised learning
-    # In reality, you'd merge with historical fire data or engineer that label
-    # For demonstration, let's create a dummy label
-    df["fire_occurred"] = (df["temp_C"] > 30) & (df["humidity"] < 30)
-    df["fire_occurred"] = df["fire_occurred"].astype(int)
+    df['season'] = df['month'].apply(get_season)
+    
+    # Moving averages
+    window_sizes = [7, 15, 30, 60, 90, 180, 360]
+    
+    for window in window_sizes:
+        df[f'precip_ma_{window}d'] = df.groupby('cell_id')['precip_in'].transform(lambda x: x.rolling(window, min_periods=1).mean())
+        df[f'tmax_ma_{window}d'] = df.groupby('cell_id')['tmax_F'].transform(lambda x: x.rolling(window, min_periods=1).mean())
+        df[f'tmin_ma_{window}d'] = df.groupby('cell_id')['tmin_F'].transform(lambda x: x.rolling(window, min_periods=1).mean())
+        df[f'ndvi_ma_{window}d'] = df.groupby('cell_id')['ndvi'].transform(lambda x: x.rolling(window, min_periods=1).mean())
+    
+    # NDVI lag feature
+    df['ndvi_lag_1d'] = df.groupby('cell_id')['ndvi'].shift(1)
+    
+    # Previous fires
+    df['fires_last_7d'] = df.groupby('cell_id')['fire_occurred'].transform(lambda x: x.rolling(7, min_periods=1).sum())
     
     return df
 
+# Encoding and Scaling
+def encode_and_scale(df):
+    categorical_cols = ['month', 'day_of_week', 'season']
+    for col in categorical_cols:
+        df[col] = df[col].fillna(df[col].mode()[0])
+    
+    df_encoded = pd.get_dummies(df, columns=categorical_cols, drop_first=True)
+    
+    # Scaling
+    numerical_cols = [col for col in df_encoded.columns if df_encoded[col].dtype in ['int64', 'float64'] and col not in ['fire_occurred', 'cell_id', 'date']]
+    
+    scaler = StandardScaler()
+    df_encoded[numerical_cols] = scaler.fit_transform(df_encoded[numerical_cols])
+    
+    return df_encoded, scaler
+
+# Automated Clustering
+def perform_clustering(df_encoded, clustering_features, k_min=2, k_max=10):
+    clustering_data = df_encoded.groupby('cell_id')[clustering_features].mean().reset_index()
+    clustering_data = clustering_data.dropna()
+    
+    best_k = 2
+    best_score = -1
+    for k in range(k_min, k_max+1):
+        kmeans = KMeans(n_clusters=k, random_state=42)
+        labels = kmeans.fit_predict(clustering_data[clustering_features])
+        score = silhouette_score(clustering_data[clustering_features], labels)
+        print(f'For k={k}, the Silhouette Score is {score:.4f}')
+        if score > best_score:
+            best_k = k
+            best_score = score
+    
+    print(f'Optimal number of clusters determined: {best_k} with Silhouette Score: {best_score:.4f}')
+    
+    # Final clustering with optimal k
+    final_kmeans = KMeans(n_clusters=best_k, random_state=42)
+    clustering_data['cluster'] = final_kmeans.fit_predict(clustering_data[clustering_features])
+    
+    return clustering_data[['cell_id', 'cluster']]
+
+# Model Training
+def train_models(df_encoded, feature_cols, target='fire_occurred'):
+    models = {}
+    clusters = df_encoded['cluster'].unique()
+    
+    for cluster in clusters:
+        print(f'Training models for Cluster {cluster}')
+        cluster_data = df_encoded[df_encoded['cluster'] == cluster]
+        X = cluster_data[feature_cols]
+        y = cluster_data[target]
+        
+        # Split data
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42, stratify=y
+        )
+        
+        # Handle class imbalance
+        smote = SMOTE(random_state=42)
+        X_train_res, y_train_res = smote.fit_resample(X_train, y_train)
+        
+        # Initialize LightGBM classifier
+        lgbm = lgb.LGBMClassifier(
+            n_estimators=100,
+            learning_rate=0.1,
+            class_weight='balanced',
+            random_state=42
+        )
+        
+        # Train model
+        lgbm.fit(X_train_res, y_train_res)
+        
+        # Store model
+        models[cluster] = lgbm
+        
+        # Evaluation
+        y_pred = lgbm.predict(X_test)
+        y_proba = lgbm.predict_proba(X_test)[:,1]
+        
+        from sklearn.metrics import classification_report, roc_auc_score, confusion_matrix
+        
+        print(f'--- Evaluation for Cluster {cluster} ---')
+        print(classification_report(y_test, y_pred))
+        print(f'ROC AUC Score: {roc_auc_score(y_test, y_proba):.2f}')
+        cm = confusion_matrix(y_test, y_pred)
+        print('Confusion Matrix:')
+        print(cm)
+    
+    return models
+
+# Save Models
+def save_models(models, save_path='models/'):
+    import os
+    if not os.path.exists(save_path):
+        os.makedirs(save_path)
+    for cluster, model in models.items():
+        joblib.dump(model, f'{save_path}/LightGBM_cluster_{cluster}.joblib')
+        print(f'Model for Cluster {cluster} saved.')
+
 def main():
-    df = load_local_data()
+    # Paths
+    DATA_CSV_PATH = "/Users/tobiascanavesi/Documents/wildifre_prevention/data/processed/merged_weather_fire_ndvi.csv"
+    GRID_SHP_PATH = "/Users/tobiascanavesi/Documents/wildifre_prevention/data/raw/ca_grid_10km.shp"
     
-    # Prepare features and target
-    X = df.drop(columns=["fire_occurred", "time"])
-    y = df["fire_occurred"]
+    # Load data
+    df = load_data(DATA_CSV_PATH)
+    grid_gdf = load_grid(GRID_SHP_PATH)
+    grid_centroids = load_grid_centroids(grid_gdf)
     
-    X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+    # Feature engineering
+    df = feature_engineering(df)
     
-    train_data = lgb.Dataset(X_train, label=y_train)
-    valid_data = lgb.Dataset(X_test, label=y_test, reference=train_data)
+    # Encode and scale
+    df_encoded, scaler = encode_and_scale(df)
     
-    params = {
-        'objective': 'binary',
-        'metric': 'auc',
-        'learning_rate': 0.05,
-        'num_leaves': 31,
-        'boosting_type': 'gbdt'
-    }
+    # Define clustering features
+    clustering_features = ['precip_ma_180d', 'tmax_ma_180d', 'tmin_ma_180d', 'ndvi_ma_180d', 'fires_last_7d']
     
-    model = lgb.train(
-        params,
-        train_data,
-        num_boost_round=100,
-        valid_sets=[train_data, valid_data],
-        valid_names=['train','valid'],
-        early_stopping_rounds=10
-    )
+    # Perform clustering
+    clustering_labels = perform_clustering(df_encoded, clustering_features, k_min=2, k_max=10)
     
-    # Evaluate
-    y_pred_proba = model.predict(X_test)
-    auc = roc_auc_score(y_test, y_pred_proba)
-    print("Validation AUC:", auc)
+    # Assign clusters to the main DataFrame
+    df_encoded = pd.merge(df_encoded, clustering_labels, on='cell_id', how='left')
     
-    # Save the model locally
-    model_path = os.path.join(MODELS_DIR, "lgb_model.txt")
-    model.save_model(model_path)
-    print(f"[Local] Model saved to {model_path}")
+    # Define feature columns for modeling
+    feature_cols = [col for col in df_encoded.columns if col not in ['fire_occurred', 'cell_id', 'date']]
+    
+    # Train models
+    models = train_models(df_encoded, feature_cols, target='fire_occurred')
+    
+    # Save models
+    save_models(models, save_path='models/')
+    
+    # Save scaler
+    joblib.dump(scaler, 'models/scaler.joblib')
+    print('Scaler saved.')
 
 if __name__ == "__main__":
     main()
