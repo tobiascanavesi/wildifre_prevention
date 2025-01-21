@@ -197,7 +197,7 @@ def main():
     api_token = st.sidebar.text_input("Enter NOAA API Token", type="password")
     
     # NOAA Location ID
-    location_id = st.sidebar.text_input("Enter NOAA Location ID", value="CITY:US360019")  # Example: New York
+    location_id = st.sidebar.text_input("Enter NOAA Location ID", value="GHCND:USW00023234")  # Example: New York
     
     # Prediction Button
     if st.sidebar.button("Run Prediction"):

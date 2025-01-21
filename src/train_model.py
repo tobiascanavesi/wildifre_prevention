@@ -11,19 +11,37 @@ import lightgbm as lgb
 from imblearn.over_sampling import SMOTE
 import joblib
 import warnings
+from sklearn.impute import SimpleImputer
+from tqdm import tqdm
+import logging
+import os
 
+# Suppress warnings
 warnings.filterwarnings("ignore")
+
+# Configure logging
+logging.basicConfig(
+    filename='model_training.log',
+    filemode='w',
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
 
 # Load data
 def load_data(csv_path):
+    logging.info(f"Loading data from {csv_path}")
     df = pd.read_csv(csv_path, parse_dates=['date'])
+    logging.info(f"Data loaded successfully with shape {df.shape}")
     return df
 
 def load_grid(shapefile_path):
+    logging.info(f"Loading grid shapefile from {shapefile_path}")
     grid_gdf = gpd.read_file(shapefile_path)
+    logging.info(f"Grid shapefile loaded successfully with {len(grid_gdf)} records")
     return grid_gdf
 
 def load_grid_centroids(grid_gdf):
+    logging.info("Calculating centroids for grid cells")
     centroids_projected = grid_gdf.geometry.centroid
     gdf_centroids = gpd.GeoDataFrame(
         grid_gdf[['cell_id']].copy(),
@@ -33,10 +51,12 @@ def load_grid_centroids(grid_gdf):
     gdf_centroids = gdf_centroids.to_crs(epsg=4326)
     gdf_centroids['centroid_lon'] = gdf_centroids.geometry.x
     gdf_centroids['centroid_lat'] = gdf_centroids.geometry.y
+    logging.info("Centroids calculated successfully")
     return gdf_centroids[['cell_id', 'centroid_lon', 'centroid_lat']]
 
 # Feature Engineering
 def feature_engineering(df):
+    logging.info("Starting feature engineering")
     # Time-based features
     df['day_of_year'] = df['date'].dt.dayofyear
     df['day_of_month'] = df['date'].dt.day
@@ -59,78 +79,105 @@ def feature_engineering(df):
     window_sizes = [7, 15, 30, 60, 90, 180, 360]
     
     for window in window_sizes:
+        logging.info(f"Calculating moving averages with window size: {window} days")
         df[f'precip_ma_{window}d'] = df.groupby('cell_id')['precip_in'].transform(lambda x: x.rolling(window, min_periods=1).mean())
         df[f'tmax_ma_{window}d'] = df.groupby('cell_id')['tmax_F'].transform(lambda x: x.rolling(window, min_periods=1).mean())
         df[f'tmin_ma_{window}d'] = df.groupby('cell_id')['tmin_F'].transform(lambda x: x.rolling(window, min_periods=1).mean())
         df[f'ndvi_ma_{window}d'] = df.groupby('cell_id')['ndvi'].transform(lambda x: x.rolling(window, min_periods=1).mean())
     
     # NDVI lag feature
+    logging.info("Creating NDVI lag feature")
     df['ndvi_lag_1d'] = df.groupby('cell_id')['ndvi'].shift(1)
     
     # Previous fires
+    logging.info("Creating previous fires feature")
     df['fires_last_7d'] = df.groupby('cell_id')['fire_occurred'].transform(lambda x: x.rolling(7, min_periods=1).sum())
     
+    logging.info("Feature engineering completed")
     return df
 
 # Encoding and Scaling
 def encode_and_scale(df):
+    logging.info("Starting encoding and scaling")
     categorical_cols = ['month', 'day_of_week', 'season']
     for col in categorical_cols:
         df[col] = df[col].fillna(df[col].mode()[0])
     
+    logging.info("Performing One-Hot Encoding")
     df_encoded = pd.get_dummies(df, columns=categorical_cols, drop_first=True)
     
-    # Scaling
+    # Identify numerical columns for scaling
     numerical_cols = [col for col in df_encoded.columns if df_encoded[col].dtype in ['int64', 'float64'] and col not in ['fire_occurred', 'cell_id', 'date']]
     
+    logging.info(f"Imputing missing numerical values in columns: {numerical_cols}")
+    # Impute numerical missing values with mean (if any remain)
+    imputer = SimpleImputer(strategy='mean')
+    df_encoded[numerical_cols] = imputer.fit_transform(df_encoded[numerical_cols])
+    
+    logging.info("Scaling numerical features")
+    # Scaling
     scaler = StandardScaler()
     df_encoded[numerical_cols] = scaler.fit_transform(df_encoded[numerical_cols])
     
+    logging.info("Encoding and scaling completed")
     return df_encoded, scaler
 
 # Automated Clustering
 def perform_clustering(df_encoded, clustering_features, k_min=2, k_max=10):
+    logging.info("Starting automated clustering")
     clustering_data = df_encoded.groupby('cell_id')[clustering_features].mean().reset_index()
     clustering_data = clustering_data.dropna()
     
     best_k = 2
     best_score = -1
-    for k in range(k_min, k_max+1):
+    logging.info("Determining the optimal number of clusters using Silhouette Score")
+    for k in tqdm(range(k_min, k_max+1), desc="Clustering Progress"):
         kmeans = KMeans(n_clusters=k, random_state=42)
         labels = kmeans.fit_predict(clustering_data[clustering_features])
         score = silhouette_score(clustering_data[clustering_features], labels)
-        print(f'For k={k}, the Silhouette Score is {score:.4f}')
+        logging.info(f'For k={k}, the Silhouette Score is {score:.4f}')
         if score > best_score:
             best_k = k
             best_score = score
     
-    print(f'Optimal number of clusters determined: {best_k} with Silhouette Score: {best_score:.4f}')
+    logging.info(f'Optimal number of clusters determined: {best_k} with Silhouette Score: {best_score:.4f}')
     
     # Final clustering with optimal k
     final_kmeans = KMeans(n_clusters=best_k, random_state=42)
     clustering_data['cluster'] = final_kmeans.fit_predict(clustering_data[clustering_features])
     
+    logging.info("Clustering completed")
     return clustering_data[['cell_id', 'cluster']]
 
 # Model Training
 def train_models(df_encoded, feature_cols, target='fire_occurred'):
+    logging.info("Starting model training")
     models = {}
     clusters = df_encoded['cluster'].unique()
     
-    for cluster in clusters:
-        print(f'Training models for Cluster {cluster}')
+    for cluster in tqdm(clusters, desc="Model Training Progress"):
+        logging.info(f'Training models for Cluster {cluster}')
         cluster_data = df_encoded[df_encoded['cluster'] == cluster]
         X = cluster_data[feature_cols]
         y = cluster_data[target]
         
+        # Check for missing values
+        if X.isnull().sum().sum() > 0:
+            logging.warning(f"Missing values detected in Cluster {cluster}. Imputing missing values.")
+            imputer = SimpleImputer(strategy='mean')
+            X = pd.DataFrame(imputer.fit_transform(X), columns=X.columns)
+        
         # Split data
+        logging.info("Splitting data into training and testing sets")
         X_train, X_test, y_train, y_test = train_test_split(
             X, y, test_size=0.2, random_state=42, stratify=y
         )
         
         # Handle class imbalance
+        logging.info("Applying SMOTE to handle class imbalance")
         smote = SMOTE(random_state=42)
         X_train_res, y_train_res = smote.fit_resample(X_train, y_train)
+        logging.info(f"After SMOTE, training data shape: {X_train_res.shape}")
         
         # Initialize LightGBM classifier
         lgbm = lgb.LGBMClassifier(
@@ -141,34 +188,50 @@ def train_models(df_encoded, feature_cols, target='fire_occurred'):
         )
         
         # Train model
+        logging.info("Training LightGBM model")
         lgbm.fit(X_train_res, y_train_res)
+        logging.info("Model training completed")
         
         # Store model
         models[cluster] = lgbm
+        logging.info(f"Model for Cluster {cluster} stored")
         
         # Evaluation
+        logging.info("Evaluating model performance")
         y_pred = lgbm.predict(X_test)
         y_proba = lgbm.predict_proba(X_test)[:,1]
         
         from sklearn.metrics import classification_report, roc_auc_score, confusion_matrix
         
-        print(f'--- Evaluation for Cluster {cluster} ---')
-        print(classification_report(y_test, y_pred))
-        print(f'ROC AUC Score: {roc_auc_score(y_test, y_proba):.2f}')
+        report = classification_report(y_test, y_pred)
+        roc_auc = roc_auc_score(y_test, y_proba)
         cm = confusion_matrix(y_test, y_pred)
-        print('Confusion Matrix:')
-        print(cm)
+        
+        logging.info(f'--- Evaluation for Cluster {cluster} ---')
+        logging.info(f'Classification Report:\n{report}')
+        logging.info(f'ROC AUC Score: {roc_auc:.2f}')
+        logging.info(f'Confusion Matrix:\n{cm}')
     
+    logging.info("Model training completed for all clusters")
     return models
 
 # Save Models
 def save_models(models, save_path='models/'):
-    import os
+    logging.info(f"Saving models to {save_path}")
     if not os.path.exists(save_path):
         os.makedirs(save_path)
+        logging.info(f"Created directory {save_path}")
     for cluster, model in models.items():
-        joblib.dump(model, f'{save_path}/LightGBM_cluster_{cluster}.joblib')
-        print(f'Model for Cluster {cluster} saved.')
+        model_filename = f'LightGBM_cluster_{cluster}.joblib'
+        joblib.dump(model, os.path.join(save_path, model_filename))
+        logging.info(f'Model for Cluster {cluster} saved as {model_filename}')
+    logging.info("All models saved successfully")
+
+# Save Scaler
+def save_scaler(scaler, save_path='models/scaler.joblib'):
+    logging.info(f"Saving scaler to {save_path}")
+    joblib.dump(scaler, save_path)
+    logging.info("Scaler saved successfully")
 
 def main():
     # Paths
@@ -177,11 +240,24 @@ def main():
     
     # Load data
     df = load_data(DATA_CSV_PATH)
+    # filter data only for 2019 and 2020
+    df = df[(df['date'].dt.year >= 2019) & (df['date'].dt.year <= 2020)]
     grid_gdf = load_grid(GRID_SHP_PATH)
     grid_centroids = load_grid_centroids(grid_gdf)
     
     # Feature engineering
     df = feature_engineering(df)
+    
+    # Handle missing values after feature engineering
+    logging.info("Handling missing values after feature engineering")
+    df = df.groupby('cell_id').apply(lambda group: group.fillna(method='ffill')).reset_index(drop=True)
+    df = df.fillna(df.mean())
+    
+    # Impute remaining categorical missing values
+    categorical_cols = ['month', 'day_of_week', 'season']
+    for col in categorical_cols:
+        df[col] = df[col].fillna(df[col].mode()[0])
+        logging.info(f"Imputed missing values in categorical column: {col}")
     
     # Encode and scale
     df_encoded, scaler = encode_and_scale(df)
@@ -193,10 +269,12 @@ def main():
     clustering_labels = perform_clustering(df_encoded, clustering_features, k_min=2, k_max=10)
     
     # Assign clusters to the main DataFrame
+    logging.info("Assigning cluster labels to the main DataFrame")
     df_encoded = pd.merge(df_encoded, clustering_labels, on='cell_id', how='left')
     
     # Define feature columns for modeling
     feature_cols = [col for col in df_encoded.columns if col not in ['fire_occurred', 'cell_id', 'date']]
+    logging.info(f"Feature columns for modeling: {feature_cols}")
     
     # Train models
     models = train_models(df_encoded, feature_cols, target='fire_occurred')
@@ -205,8 +283,8 @@ def main():
     save_models(models, save_path='models/')
     
     # Save scaler
-    joblib.dump(scaler, 'models/scaler.joblib')
-    print('Scaler saved.')
+    save_scaler(scaler, save_path='models/scaler.joblib')
+    logging.info('Scaler saved.')
 
 if __name__ == "__main__":
     main()

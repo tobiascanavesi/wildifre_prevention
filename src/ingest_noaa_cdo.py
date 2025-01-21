@@ -1,9 +1,9 @@
 import os
 import requests
 import pandas as pd
-from datetime import datetime, timedelta
-
-CDO_TOKEN = "FBYGDxCnrDBxxUXdXqAbPRFUYqMBWzqK"
+from datetime import datetime
+from dotenv import load_dotenv
+load_dotenv()
 
 # NOAA CDO specifics
 CDO_URL = "https://www.ncdc.noaa.gov/cdo-web/api/v2/data"

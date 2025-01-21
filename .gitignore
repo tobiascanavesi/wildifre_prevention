@@ -15,3 +15,5 @@ data/
 train_model.py
 # exlude data_exploration.ipynb
 data_exploration.ipynb
+*.log
+.env
