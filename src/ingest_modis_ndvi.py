@@ -60,6 +60,7 @@ def compute_ndvi_per_cell(grid_gdf, ndvi_path):
 
         records = []
         for _, row in grid_gdf.iterrows():
+            breakpoint()
             cell_id = row["cell_id"]
             centroid = row.geometry.centroid
             row_col = ~ndvi_transform * (centroid.x, centroid.y)
