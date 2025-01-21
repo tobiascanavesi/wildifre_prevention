@@ -17,7 +17,7 @@ warnings.filterwarnings("ignore")
 
 # Set the page configuration
 st.set_page_config(
-    page_title="Wildfire Prevention Dashboard",
+    page_title="Wildfire Prevention Dashboard for California",
     layout="wide",
     initial_sidebar_state="expanded",
 )
