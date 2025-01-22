@@ -1,4 +1,5 @@
 # src/dashboard.py
+from utils import load_data, load_grid, load_grid_centroids
 
 import streamlit as st
 import pandas as pd
@@ -9,11 +10,9 @@ import geopandas as gpd
 from streamlit_folium import st_folium
 import folium
 from folium.plugins import Draw
-from shapely.geometry import Point, Polygon
+from shapely.geometry import Polygon
+import os
 
-# Suppress warnings for cleaner output
-import warnings
-warnings.filterwarnings("ignore")
 
 # Set the page configuration
 st.set_page_config(
@@ -28,56 +27,12 @@ st.title("🌲 Wildfire Prevention Dashboard")
 # Sidebar for Filters
 st.sidebar.header("Filters")
 
-# Function to load data
-@st.cache_data
-def load_data(csv_path):
-    df = pd.read_csv(csv_path, parse_dates=['date'])
-    return df
-
-# Function to load grid shapefile
-@st.cache_data
-def load_grid(shapefile_path):
-    grid_gdf = gpd.read_file(shapefile_path)
-    return grid_gdf
-
-# Function to load grid centroids
-@st.cache_data
-def load_grid_centroids(_grid_gdf):
-    """
-    Compute centroids in projected CRS and reproject them to geographic CRS.
-
-    Parameters:
-        _grid_gdf (GeoDataFrame): Projected GeoDataFrame of grid cells.
-
-    Returns:
-        GeoDataFrame: DataFrame with 'cell_id', 'centroid_lon', 'centroid_lat'.
-    """
-    # Compute centroids in projected CRS (EPSG:3310)
-    centroids_projected = _grid_gdf.geometry.centroid
-
-    # Create a GeoDataFrame with centroids
-    gdf_centroids = gpd.GeoDataFrame(
-        _grid_gdf[['cell_id']].copy(),
-        geometry=centroids_projected,
-        crs=_grid_gdf.crs
-    )
-
-    # Reproject centroids to geographic CRS (EPSG:4326)
-    gdf_centroids = gdf_centroids.to_crs(epsg=4326)
-
-    # Extract longitude and latitude
-    gdf_centroids['centroid_lon'] = gdf_centroids.geometry.x
-    gdf_centroids['centroid_lat'] = gdf_centroids.geometry.y
-
-    # Return only necessary columns
-    return gdf_centroids[['cell_id', 'centroid_lon', 'centroid_lat']]
-
 # Load the merged dataset
-DATA_CSV_PATH = "/Users/tobiascanavesi/Documents/wildifre_prevention/data/processed/merged_weather_fire_ndvi.csv"
+DATA_CSV_PATH = os.path.join("data", "processed", "merged_weather_fire_ndvi.csv")
 df = load_data(DATA_CSV_PATH)
 
 # Load grid shapefile
-GRID_SHP_PATH = "/Users/tobiascanavesi/Documents/wildifre_prevention/data/raw/ca_grid_10km.shp"
+GRID_SHP_PATH = os.path.join("data", "raw", "ca_grid_10km.shp")
 grid_gdf = load_grid(GRID_SHP_PATH)
 
 # Load centroids

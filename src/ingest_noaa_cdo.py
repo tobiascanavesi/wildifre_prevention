@@ -5,6 +5,7 @@ from datetime import datetime
 from dotenv import load_dotenv
 load_dotenv()
 
+CDO_TOKEN = os.getenv("CDO_TOKEN")
 # NOAA CDO specifics
 CDO_URL = "https://www.ncdc.noaa.gov/cdo-web/api/v2/data"
 DATASET_ID = "GHCND"  # daily data

@@ -31,6 +31,8 @@ logging.basicConfig(
 def load_data(csv_path):
     logging.info(f"Loading data from {csv_path}")
     df = pd.read_csv(csv_path, parse_dates=['date'])
+    # only keep year 2020
+    df = df[df['date'].dt.year == 2020]
     logging.info(f"Data loaded successfully with shape {df.shape}")
     return df
 
@@ -96,6 +98,32 @@ def feature_engineering(df):
     logging.info("Feature engineering completed")
     return df
 
+# Optimized Missing Value Handling
+def handle_missing_values(df):
+    logging.info("Handling missing values after feature engineering")
+    
+    # Ensure the DataFrame is sorted by 'cell_id' and 'date' for correct forward-fill
+    if 'date' in df.columns:
+        df = df.sort_values(['cell_id', 'date'])
+        logging.info("DataFrame sorted by 'cell_id' and 'date'")
+    else:
+        df = df.sort_values('cell_id')
+        logging.info("DataFrame sorted by 'cell_id'")
+    
+    # Forward-fill within each 'cell_id' group
+    df[['precip_in', 'tmax_F', 'tmin_F', 'ndvi', 'fire_occurred']] = df.groupby('cell_id')[['precip_in', 'tmax_F', 'tmin_F', 'ndvi', 'fire_occurred']].ffill()
+    logging.info("Forward-fill applied within each 'cell_id' group")
+    
+    # Backward-fill to handle any remaining NaNs at the start of each group
+    df[['precip_in', 'tmax_F', 'tmin_F', 'ndvi', 'fire_occurred']] = df.groupby('cell_id')[['precip_in', 'tmax_F', 'tmin_F', 'ndvi', 'fire_occurred']].bfill()
+    logging.info("Backward-fill applied within each 'cell_id' group")
+    
+    # Drop any remaining NaNs
+    df = df.dropna()
+    logging.info("NaN values dropped")
+    
+    return df
+
 # Encoding and Scaling
 def encode_and_scale(df):
     logging.info("Starting encoding and scaling")
@@ -110,6 +138,12 @@ def encode_and_scale(df):
     numerical_cols = [col for col in df_encoded.columns if df_encoded[col].dtype in ['int64', 'float64'] and col not in ['fire_occurred', 'cell_id', 'date']]
     
     logging.info(f"Imputing missing numerical values in columns: {numerical_cols}")
+    numerical_features_path = os.path.join('models', 'numerical_features.txt')
+    with open(numerical_features_path, 'w') as f:
+        for feature in numerical_cols:
+            f.write(f"{feature}\n")
+    logging.info(f"Numerical features saved to {numerical_features_path}")
+    
     # Impute numerical missing values with mean (if any remain)
     imputer = SimpleImputer(strategy='mean')
     df_encoded[numerical_cols] = imputer.fit_transform(df_encoded[numerical_cols])
@@ -120,6 +154,7 @@ def encode_and_scale(df):
     df_encoded[numerical_cols] = scaler.fit_transform(df_encoded[numerical_cols])
     
     logging.info("Encoding and scaling completed")
+
     return df_encoded, scaler
 
 # Automated Clustering
@@ -233,6 +268,15 @@ def save_scaler(scaler, save_path='models/scaler.joblib'):
     joblib.dump(scaler, save_path)
     logging.info("Scaler saved successfully")
 
+# Save Clustering Labels
+def save_clustering_labels(clustering_labels, save_path='data/processed/clustering_labels.csv'):
+    logging.info(f"Saving clustering labels to {save_path}")
+    if not os.path.exists(os.path.dirname(save_path)):
+        os.makedirs(os.path.dirname(save_path))
+        logging.info(f"Created directory {os.path.dirname(save_path)}")
+    clustering_labels.to_csv(save_path, index=False)
+    logging.info("Clustering labels saved successfully")
+
 def main():
     # Paths
     DATA_CSV_PATH = "/Users/tobiascanavesi/Documents/wildifre_prevention/data/processed/merged_weather_fire_ndvi.csv"
@@ -240,8 +284,6 @@ def main():
     
     # Load data
     df = load_data(DATA_CSV_PATH)
-    # filter data only for 2019 and 2020
-    df = df[(df['date'].dt.year >= 2019) & (df['date'].dt.year <= 2020)]
     grid_gdf = load_grid(GRID_SHP_PATH)
     grid_centroids = load_grid_centroids(grid_gdf)
     
@@ -249,15 +291,7 @@ def main():
     df = feature_engineering(df)
     
     # Handle missing values after feature engineering
-    logging.info("Handling missing values after feature engineering")
-    df = df.groupby('cell_id').apply(lambda group: group.fillna(method='ffill')).reset_index(drop=True)
-    df = df.fillna(df.mean())
-    
-    # Impute remaining categorical missing values
-    categorical_cols = ['month', 'day_of_week', 'season']
-    for col in categorical_cols:
-        df[col] = df[col].fillna(df[col].mode()[0])
-        logging.info(f"Imputed missing values in categorical column: {col}")
+    df = handle_missing_values(df)
     
     # Encode and scale
     df_encoded, scaler = encode_and_scale(df)
@@ -268,17 +302,25 @@ def main():
     # Perform clustering
     clustering_labels = perform_clustering(df_encoded, clustering_features, k_min=2, k_max=10)
     
+    # Save clustering labels
+    save_clustering_labels(clustering_labels, save_path='data/processed/clustering_labels.csv')
+    
     # Assign clusters to the main DataFrame
     logging.info("Assigning cluster labels to the main DataFrame")
     df_encoded = pd.merge(df_encoded, clustering_labels, on='cell_id', how='left')
     
     # Define feature columns for modeling
-    feature_cols = [col for col in df_encoded.columns if col not in ['fire_occurred', 'cell_id', 'date']]
+    feature_cols = [col for col in df_encoded.columns if col not in ['fire_occurred', 'cell_id', 'date', 'cluster']]
     logging.info(f"Feature columns for modeling: {feature_cols}")
     
     # Train models
     models = train_models(df_encoded, feature_cols, target='fire_occurred')
-    
+
+    feature_names_path = os.path.join('models', 'feature_names.txt')
+    with open(feature_names_path, 'w') as f:
+        for feature in feature_cols:
+            f.write(f"{feature}\n")
+    logging.info(f"Feature names saved to {feature_names_path}")
     # Save models
     save_models(models, save_path='models/')
     
